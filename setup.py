@@ -3,7 +3,7 @@ import datetime
 try:
     import kiteconnect
 except ImportError:
-    os.system('python3 -m pip install kiteconnect')
+    os.system('python -m pip install kiteconnect')
 
 import sys
 import json
@@ -48,8 +48,8 @@ def ConnectZerodha():
         print("Login url : ", kite.login_url())
         request_tkn = input("Login and enter your 'request token' here : ")
         try:
-            access_token = kite.generate_session(request_token=request_tkn, api_secret=login_credential["api_secret"])[
-                'access_token']
+            access_token = kite.generate_session(request_token=request_tkn,
+                                                 api_secret=login_credential["api_secret"])['access_token']
             os.makedirs(f"AccessToken", exist_ok=True)
             with open(f"AccessToken/{datetime.datetime.now().date()}.json", "w") as f:
                 json.dump(access_token, f)
@@ -73,7 +73,9 @@ def AddStock():
     instruments = kite.instruments()
 
     for instrument in instruments:
-        if (instrument["exchange"] == "NSE"):
+        if (instrument["exchange"] == "NSE"
+            and instrument["name"] != ""
+            and instrument["segment"] != "INDICES"):
             stockList.insert(stockList.size(), instrument["name"])
 
 
