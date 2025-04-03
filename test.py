@@ -1,176 +1,98 @@
-import os
 import time
-import datetime
-try:
-    import kiteconnect
-except ImportError:
-    os.system('python -m pip install kiteconnect')
-
-import sys
-import json
-
-import logging
-from kiteconnect import KiteConnect, KiteTicker
 import pandas as pd
 
-instrument_tokens = {
-    "RELIANCE": 738561,
-    "TCS": 2953217,
-    "SUZLON": 3076609,
-    "SASKEN": 3067649,
-    "ONGC":128079876
-}
-
-kws = 0
+from connect import *
+from handler import *
+from constant import instrument_tokens
+from signal import *
+import constant
 
 
-def ConnectZerodha():
-    global kite, kws
-
-    login_credential = {"api_key": "", "api_secret": ""}
-    print("Zerodha Login Credentials")
-    try:
-        with open(f"credentials.json", "r") as f:
-            login_credential = json.load(f)
-            print("Loggin in as: ", login_credential)
-    except:
-        login_credential = {"api_key": str(input("Enter API Key :")),
-                        "api_secret": str(input("Enter API Secret :"))}
-        if input("Press Y to save login credential and any key to bypass : ").upper() == "Y":
-            with open(f"credentials.json", "w") as f:
-                json.dump(login_credential, f)
-            print("Credentials Saved in credentials.json")
-        else:
-            print("Credentials not saved!")
-
-    print("Getting Access Token")
-    if os.path.exists(f"AccessToken/{datetime.datetime.now().date()}.json"):
-        with open(f"AccessToken/{datetime.datetime.now().date()}.json", "r") as f:
-            access_token = json.load(f)
-            kite = KiteConnect(api_key=login_credential["api_key"])
-            kite.set_access_token(access_token)
-    else:
-        print("Trying Log In...")
-        kite = KiteConnect(api_key=login_credential["api_key"])
-        print("Login url : ", kite.login_url())
-        request_tkn = input("Login and enter your 'request token' here : ")
-        try:
-            access_token = kite.generate_session(request_token=request_tkn,
-                                                 api_secret=login_credential["api_secret"])['access_token']
-            os.makedirs(f"AccessToken", exist_ok=True)
-            with open(f"AccessToken/{datetime.datetime.now().date()}.json", "w") as f:
-                json.dump(access_token, f)
-            print("Login successful...")
-        except Exception as e:
-            print(f"Login Failed {{{e}}}")
-            sys.exit()
-
-    # WebSocket Connection
-    kws = KiteTicker(login_credential["api_key"], access_token)
+bought_stocks = {}
+trade_history = {}
 
 
 
-def ShowProfile():
-    global kite
+def Execute(stock, token, data):
+    signal = EMA_5_13_50(data, stock, token)
+    quantity = 1
 
-    profile = kite.profile()
-    print(profile)
-    print("Logged in as: ",(profile["user_name"]))
-    print("UID: ",(profile["user_id"]))
-
-def EMA(df, column, span):
-    return df[column].ewm(span=span, adjust=False).mean()
-
-def SMA(df, column, span):
-    return df[column].rolling(window=span).mean()
-
-def RSI(df, column, period=14):
-    delta = df[column].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def FetchData(token, column, interval="15minute"):
-    try:
-        data = kite.historical_data(token, pd.Timestamp.now() - pd.Timedelta(days=10), pd.Timestamp.now(), interval)
-        df = pd.DataFrame(data)
-
-        # Calculate EMA and RSI values and add it to the dataframe
-        df["EMA_5"] = EMA(df, column, 5)
-        df["EMA_13"] = EMA(df, column, 13)
-        df["EMA_55"] = EMA(df, column, 55)
-        df["RSI"] = RSI(df, column)
-
-        return df
-    except Exception as e:
-        print(f"Error fetching historical data: {e}")
-        return None
-
-def CheckSignal(stock, data):
-    # Get the calculated EMAs
     ema_data = data.iloc[-1]
-    ema_prev = data.iloc[-2]
+    atr = ema_data["ATR"]
+    close_price = ema_data["close"]
 
-    if ema_data is None:
-        return
-    if ema_prev is None:
-        ema_prev = ema_data
+    stop_loss = close_price - (atr * 1.5)
+    take_profit = close_price + (atr * 2)
 
-    ema_5 = ema_data["EMA_5"]
-    ema_13 = ema_data["EMA_13"]
-    ema_55 = ema_data["EMA_55"]
-    rsi = ema_data["RSI"]
+    if stock in bought_stocks:
+        for position in bought_stocks[stock]:
+            entry_price = position['entry_price']
+            if close_price <= position['stop_loss'] or close_price >= position['take_profit']:
+                Order(stock, "SELL", close_price)
+                return
 
-    # to make it simpler, remove last condition
-    if ema_5 > ema_13 and ema_5 > ema_55 and ema_13 > ema_55 and rsi > 50 and ema_prev["EMA_5"] < ema_prev["EMA_13"]:
-        print("BUY: ", stock)
+    if signal == 1:
+        Order(stock, "BUY", close_price, stop_loss, take_profit)
 
-    elif ema_5 < ema_13 and ema_5 < ema_55 and ema_13 < ema_55 and rsi < 50 and ema_prev["EMA_5"] > ema_prev["EMA_13"]:
-        print("SELL: ", stock)
+    elif signal==2 and stock in bought_stocks:
+        Order(stock, "SELL", close_price)
 
-def on_connect(ws, response):
-    ws.subscribe(list(instrument_tokens.values()))
-    ws.set_mode(ws.MODE_FULL, list(instrument_tokens.values()))
-    print("Websocket connecteed")
+def Order(stock, order_type, price=None, stop_loss=None, take_profit=None):
+    try:
+        quantity = 1  # Modify as needed
+        #order = kite.place_order(
+        #    variety=kite.VARIETY_REGULAR,
+        #    exchange=kite.EXCHANGE_NSE,
+        #    tradingsymbol=stock,
+        #    transaction_type=kite.TRANSACTION_TYPE_BUY if order_type == "BUY" else kite.TRANSACTION_TYPE_SELL,
+        #    quantity=quantity,
+        #    order_type=kite.ORDER_TYPE_MARKET,
+        #    product=kite.PRODUCT_MIS
+        #)
+        order = 0
 
-def on_close(ws, code, reason):
-    print("WebSocket closed:", reason)
-
-def on_ticks(ws, ticks):
-    return
-    for tick in ticks:
-        token = tick["instrument_token"]
-        for stock, inst_token in instrument_tokens.items():
-            if token == inst_token:
-                print(f"📊 {stock} | Live Price: {tick['last_price']}")
-
+        if order_type == "BUY":
+            print(f"🔼 {order_type} Order Placed for {stock} @ {price}")
+            if stock not in bought_stocks:
+                bought_stocks[stock] = []
+            bought_stocks[stock].append({'quantity': quantity, 'entry_price': price, 'stop_loss': stop_loss, 'take_profit': take_profit})
+        elif order_type == "SELL" and stock in bought_stocks:
+            print(f"🔽 {order_type} Order Placed for {stock} @ {price}")
+            if bought_stocks[stock]:
+                bought_stocks[stock].pop(0)  # Remove oldest position first
+            if not bought_stocks[stock]:
+                del bought_stocks[stock]  # Remove stock entry if all positions are sold
+    except Exception as e:
+        print(f"❌ Order Failed for {stock}: {e}")
 
 def main():
+
+    constant.init()
+    # Connect to zerodha using access token
+    constant.kite, constant.kws = ConnectZerodha()
+
+    # Display profile information
+    ShowProfile(constant.kite)
+
+    constant.kws.on_ticks = on_ticks
+    constant.kws.on_connect = on_connect
+    constant.kws.on_close = on_close
+    constant.kws.connect(threaded=True)
+
+    while not constant.kws.is_connected():
+        print("🚀 Waiting for WebSocket connection...")
+        time.sleep(2)
+
     while True:
         for stock, token in instrument_tokens.items():
             data = FetchData(token, "close", interval="minute")
-            CheckSignal(stock, data)
+            if data is None:
+                continue
+            Execute(stock, token, data)
 
-        time.sleep(60)  # Fetch every 10 minutes
+        time.sleep(60)  # Fetch every 1 minute
 
 
-def start_websocket():
-    global kws
+main()
 
-    # Connect to zerodha using access token
-    ConnectZerodha()
-
-    # Display profile information
-    ShowProfile()
-
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-    kws.connect(threaded=True)
-
-    main()
-
-# Start WebSocket connection
-start_websocket()
 
